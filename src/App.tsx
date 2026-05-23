@@ -12,10 +12,13 @@ import {
   Settings,
   Shield,
   ShoppingCart,
+  Skull,
   Swords,
   Trophy,
   Trees,
-  Zap
+  Zap,
+  HeartPulse as HeartPulseIcon,
+  Droplets
 } from 'lucide-react';
 import PhaserGame from './game/PhaserGame';
 import { gameEvents } from './game/EventBus';
@@ -33,10 +36,12 @@ const RESOURCE_LABELS: Record<ResourceType, string> = {
   iron: 'Besi'
 };
 
-const BUILD_COSTS: Array<{ type: 'wall' | 'turret' | 'spike'; label: string; icon: typeof Shield; cost: Cost }> = [
+const BUILD_COSTS: Array<{ type: 'wall' | 'turret' | 'spike' | 'healingWard' | 'tarTrap'; label: string; icon: typeof Shield; cost: Cost }> = [
   { type: 'wall', label: 'Wall', icon: Shield, cost: { coins: 35, wood: 14 } },
   { type: 'turret', label: 'Turret', icon: Zap, cost: { coins: 95, wood: 24, stone: 12 } },
-  { type: 'spike', label: 'Spike', icon: Swords, cost: { coins: 55, wood: 10, stone: 10 } }
+  { type: 'spike', label: 'Spike', icon: Swords, cost: { coins: 55, wood: 10, stone: 10 } },
+  { type: 'healingWard', label: 'Healing Ward', icon: HeartPulseIcon, cost: { coins: 150, wood: 30, stone: 20 } },
+  { type: 'tarTrap', label: 'Tar Trap', icon: Droplets, cost: { coins: 65, wood: 5, stone: 15 } }
 ];
 
 export default function App() {
@@ -133,6 +138,10 @@ export default function App() {
           <PauseOverlay onResume={resumeGame} onMenu={returnToMenu} muted={muted} onMute={toggleMute} />
         )}
 
+        {screen === 'playing' && snapshot.gameOver && (
+          <GameOverOverlay snapshot={snapshot} onMenu={returnToMenu} />
+        )}
+
         {screen !== 'menu' && panel !== 'none' && (
           <SidePanel
             panel={panel}
@@ -140,7 +149,6 @@ export default function App() {
             muted={muted}
             onClose={() => setPanel('none')}
             onSell={() => gameEvents.emit('ui:sell')}
-            onUpgrade={() => gameEvents.emit('ui:upgradeBlade')}
             onBuild={(type) => gameEvents.emit('ui:build', type)}
             onMute={toggleMute}
             onMenu={returnToMenu}
@@ -190,21 +198,13 @@ interface ActionRailProps {
 function ActionRail({ snapshot, panel, onPanel, onSell, onHeal, onNextWave }: ActionRailProps) {
   return (
     <nav className="action-rail" aria-label="Game actions">
-      <button className={panel === 'inventory' ? 'rail-button active' : 'rail-button'} onClick={() => onPanel('inventory')} title="Inventory">
-        <Package size={19} />
-        <span>Bag</span>
-      </button>
-      <button className={panel === 'upgrade' ? 'rail-button active' : 'rail-button'} onClick={() => onPanel('upgrade')} title="Upgrade">
-        <Zap size={19} />
-        <span>Blade</span>
+      <button className={panel === 'market' ? 'rail-button active' : 'rail-button'} onClick={() => onPanel('market')} title="Market">
+        <Coins size={19} />
+        <span>Market</span>
       </button>
       <button className={panel === 'build' ? 'rail-button active' : 'rail-button'} onClick={() => onPanel('build')} title="Build">
         <Hammer size={19} />
         <span>Build</span>
-      </button>
-      <button className="rail-button" onClick={onSell} title="Sell resource" disabled={!snapshot.canSell}>
-        <ShoppingCart size={19} />
-        <span>Sell</span>
       </button>
       <button className="rail-button" onClick={onHeal} title="Heal">
         <HeartPulse size={19} />
@@ -226,14 +226,13 @@ interface SidePanelProps {
   muted: boolean;
   onClose: () => void;
   onSell: () => void;
-  onUpgrade: () => void;
-  onBuild: (type: 'wall' | 'turret' | 'spike') => void;
+  onBuild: (type: 'wall' | 'turret' | 'spike' | 'healingWard' | 'tarTrap') => void;
   onMute: () => void;
   onMenu: () => void;
 }
 
-function SidePanel({ panel, snapshot, muted, onClose, onSell, onUpgrade, onBuild, onMute, onMenu }: SidePanelProps) {
-  const title = panel === 'inventory' ? 'Inventory' : panel === 'upgrade' ? 'Upgrade' : panel === 'build' ? 'Defense' : 'Settings';
+function SidePanel({ panel, snapshot, muted, onClose, onSell, onBuild, onMute, onMenu }: SidePanelProps) {
+  const title = panel === 'market' ? 'Market' : panel === 'build' ? 'Defense' : 'Settings';
 
   return (
     <aside className="side-panel">
@@ -244,15 +243,14 @@ function SidePanel({ panel, snapshot, muted, onClose, onSell, onUpgrade, onBuild
         </button>
       </div>
 
-      {panel === 'inventory' && <InventoryPanel snapshot={snapshot} onSell={onSell} />}
-      {panel === 'upgrade' && <UpgradePanel snapshot={snapshot} onUpgrade={onUpgrade} />}
+      {panel === 'market' && <MarketPanel snapshot={snapshot} onSell={onSell} />}
       {panel === 'build' && <BuildPanel snapshot={snapshot} onBuild={onBuild} />}
       {panel === 'settings' && <SettingsPanel muted={muted} onMute={onMute} onMenu={onMenu} />}
     </aside>
   );
 }
 
-function InventoryPanel({ snapshot, onSell }: { snapshot: GameSnapshot; onSell: () => void }) {
+function MarketPanel({ snapshot, onSell }: { snapshot: GameSnapshot; onSell: () => void }) {
   const totalValue = Object.entries(snapshot.inventory).reduce(
     (total, [key, amount]) => total + amount * ({ wood: 2, stone: 4, iron: 8 }[key as ResourceType] ?? 0),
     0
@@ -275,39 +273,16 @@ function InventoryPanel({ snapshot, onSell }: { snapshot: GameSnapshot; onSell: 
       </div>
       <button className="wide-button" onClick={onSell} disabled={!snapshot.canSell || totalValue === 0}>
         <ShoppingCart size={18} />
-        Sell Resource
+        Jual Semua Resource
       </button>
+      <div style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: '#9ca3af', textAlign: 'center' }}>
+        *Pedang berevolusi otomatis sesuai level!
+      </div>
     </div>
   );
 }
 
-function UpgradePanel({ snapshot, onUpgrade }: { snapshot: GameSnapshot; onUpgrade: () => void }) {
-  const nextCost = snapshot.blade.nextCost;
-
-  return (
-    <div className="panel-body">
-      <div className="stat-list">
-        <StatRow label="Blade" value={snapshot.blade.name} />
-        <StatRow label="Damage" value={String(snapshot.blade.damage)} />
-        <StatRow label="Radius" value={String(snapshot.blade.radius)} />
-        <StatRow label="Jumlah" value={String(snapshot.blade.bladeCount)} />
-        <StatRow label="Critical" value={`${Math.round(snapshot.blade.criticalChance * 100)}%`} />
-      </div>
-
-      <div className="cost-box">
-        <span>Cost berikutnya</span>
-        {nextCost ? <CostView cost={nextCost} /> : <strong>Max level</strong>}
-      </div>
-
-      <button className="wide-button" onClick={onUpgrade} disabled={!snapshot.canUpgradeBlade}>
-        <Zap size={18} />
-        Upgrade Blade
-      </button>
-    </div>
-  );
-}
-
-function BuildPanel({ snapshot, onBuild }: { snapshot: GameSnapshot; onBuild: (type: 'wall' | 'turret' | 'spike') => void }) {
+function BuildPanel({ snapshot, onBuild }: { snapshot: GameSnapshot; onBuild: (type: 'wall' | 'turret' | 'spike' | 'healingWard' | 'tarTrap') => void }) {
   return (
     <div className="panel-body">
       <div className="summary-line">
@@ -372,10 +347,6 @@ function MainMenu({ bestWave, bestCoins, panel, muted, onPlay, onPanel, onMute }
             <Play size={22} />
             Play
           </button>
-          <button className="menu-button" onClick={() => onPanel('upgrade')}>
-            <Zap size={20} />
-            Upgrade
-          </button>
           <button className="menu-button" onClick={() => onPanel('settings')}>
             <Settings size={20} />
             Settings
@@ -408,12 +379,6 @@ function MainMenu({ bestWave, bestCoins, panel, muted, onPlay, onPanel, onMute }
                 <span>FX Visual</span>
                 <strong>{muted ? 'Low' : 'Full'}</strong>
               </button>
-            </>
-          )}
-          {panel === 'upgrade' && (
-            <>
-              <h2>Upgrade</h2>
-              <p className="muted-copy">Upgrade aktif saat run dimulai.</p>
             </>
           )}
         </div>
@@ -449,6 +414,48 @@ function PauseOverlay({
         <button className="wide-button neutral" onClick={onMenu}>
           <Home size={18} />
           Main Menu
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function GameOverOverlay({ snapshot, onMenu }: { snapshot: GameSnapshot; onMenu: () => void }) {
+  return (
+    <section className="gameover-overlay">
+      <div className="gameover-panel">
+        <div className="gameover-icon">
+          <Skull size={48} />
+        </div>
+        <h2 className="gameover-title">Game Over</h2>
+        <p className="gameover-subtitle">Base telah hancur!</p>
+
+        <div className="gameover-stats">
+          <div className="gameover-stat">
+            <Swords size={16} />
+            <span>Wave Terakhir</span>
+            <strong>{snapshot.wave}</strong>
+          </div>
+          <div className="gameover-stat">
+            <Trophy size={16} />
+            <span>Level</span>
+            <strong>{snapshot.playerLevel}</strong>
+          </div>
+          <div className="gameover-stat">
+            <Coins size={16} />
+            <span>Koin</span>
+            <strong>{snapshot.coins}</strong>
+          </div>
+          <div className="gameover-stat">
+            <Zap size={16} />
+            <span>Blade</span>
+            <strong>{snapshot.blade.name}</strong>
+          </div>
+        </div>
+
+        <button className="wide-button" onClick={onMenu}>
+          <Home size={18} />
+          Kembali ke Menu
         </button>
       </div>
     </section>

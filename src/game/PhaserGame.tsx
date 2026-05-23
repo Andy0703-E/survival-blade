@@ -30,8 +30,8 @@ export default function PhaserGame() {
         activePointers: 4
       },
       render: {
-        antialias: true,
-        pixelArt: false
+        antialias: false,
+        pixelArt: true
       },
       scene: [SurvivalScene]
     });

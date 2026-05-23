@@ -2,7 +2,7 @@ import { create } from 'zustand';
 
 export type ResourceType = 'wood' | 'stone' | 'iron';
 export type ScreenState = 'menu' | 'playing' | 'paused';
-export type PanelState = 'none' | 'inventory' | 'upgrade' | 'build' | 'settings' | 'leaderboard';
+export type PanelState = 'none' | 'inventory' | 'market' | 'build' | 'settings' | 'leaderboard';
 
 export type Inventory = Record<ResourceType, number>;
 
@@ -56,6 +56,7 @@ export interface GameSnapshot {
   world: { width: number; height: number };
   dots: MapDot[];
   defenses: number;
+  gameOver: boolean;
 }
 
 export const initialInventory: Inventory = {
@@ -98,7 +99,8 @@ export const initialSnapshot: GameSnapshot = {
   market: { x: 1230, y: 700 },
   world: { width: 2200, height: 1600 },
   dots: [],
-  defenses: 0
+  defenses: 0,
+  gameOver: false
 };
 
 interface GameStore {

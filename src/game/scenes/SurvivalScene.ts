@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { gameEvents } from '../EventBus';
 import type { BladeSnapshot, Cost, GameSnapshot, Inventory, ResourceType } from '../../store/useGameStore';
+import { AudioController } from '../AudioController';
 
 const WORLD = { width: 2200, height: 1600 };
 const PLAYER_START = { x: WORLD.width / 2, y: WORLD.height / 2 };
@@ -22,10 +23,12 @@ const RESOURCE_COLORS: Record<ResourceType, number> = {
 const BUILDING_COSTS: Record<DefenseType, Cost> = {
   wall: { coins: 35, wood: 14 },
   turret: { coins: 95, wood: 24, stone: 12 },
-  spike: { coins: 55, wood: 10, stone: 10 }
+  spike: { coins: 55, wood: 10, stone: 10 },
+  healingWard: { coins: 150, wood: 30, stone: 20 },
+  tarTrap: { coins: 65, wood: 5, stone: 15 }
 };
 
-const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> = [
+const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost; element: 'none' | 'fire' | 'lightning' }> = [
   {
     level: 1,
     name: 'Wooden Blade',
@@ -36,6 +39,7 @@ const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> 
     criticalChance: 0.05,
     knockback: 28,
     color: 0xd9a45c,
+    element: 'none',
     costToNext: { coins: 80, wood: 18 }
   },
   {
@@ -48,6 +52,7 @@ const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> 
     criticalChance: 0.08,
     knockback: 35,
     color: 0xd1d5db,
+    element: 'none',
     costToNext: { coins: 160, wood: 24, stone: 14 }
   },
   {
@@ -60,6 +65,7 @@ const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> 
     criticalChance: 0.1,
     knockback: 42,
     color: 0x8bd3dd,
+    element: 'none',
     costToNext: { coins: 290, stone: 28, iron: 8 }
   },
   {
@@ -72,6 +78,7 @@ const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> 
     criticalChance: 0.14,
     knockback: 48,
     color: 0xff7a45,
+    element: 'fire',
     costToNext: { coins: 480, wood: 40, stone: 34, iron: 18 }
   },
   {
@@ -84,6 +91,7 @@ const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> 
     criticalChance: 0.18,
     knockback: 56,
     color: 0xf6e05e,
+    element: 'lightning',
     costToNext: { coins: 760, stone: 50, iron: 34 }
   },
   {
@@ -95,13 +103,14 @@ const BLADE_LEVELS: Array<BladeSnapshot & { color: number; costToNext?: Cost }> 
     bladeCount: 4,
     criticalChance: 0.24,
     knockback: 70,
-    color: 0xe879f9
+    color: 0xe879f9,
+    element: 'none'
   }
 ];
 
 type EnemyKind = 'slime' | 'goblin' | 'skeleton' | 'boss';
 type ResourceNodeType = ResourceType;
-type DefenseType = 'wall' | 'turret' | 'spike';
+type DefenseType = 'wall' | 'turret' | 'spike' | 'healingWard' | 'tarTrap';
 
 interface MovementKeys {
   W: Phaser.Input.Keyboard.Key;
@@ -112,6 +121,8 @@ interface MovementKeys {
   DOWN: Phaser.Input.Keyboard.Key;
   LEFT: Phaser.Input.Keyboard.Key;
   RIGHT: Phaser.Input.Keyboard.Key;
+  SPACE: Phaser.Input.Keyboard.Key;
+  SHIFT: Phaser.Input.Keyboard.Key;
 }
 
 interface EnemyConfig {
@@ -142,6 +153,8 @@ interface Enemy {
   lastBladeHit: number;
   knockX: number;
   knockY: number;
+  burnUntil?: number;
+  lastBurnTick?: number;
 }
 
 interface ResourceNode {
@@ -188,7 +201,7 @@ const ENEMY_CONFIGS: Record<EnemyKind, EnemyConfig> = {
     attackRange: 36,
     attackMs: 850,
     animKey: 'enemy-slime-walk',
-    scale: 1
+    scale: 3
   },
   goblin: {
     hp: 60,
@@ -199,7 +212,7 @@ const ENEMY_CONFIGS: Record<EnemyKind, EnemyConfig> = {
     attackRange: 38,
     attackMs: 760,
     animKey: 'enemy-goblin-walk',
-    scale: 1.05
+    scale: 3.5
   },
   skeleton: {
     hp: 50,
@@ -210,7 +223,7 @@ const ENEMY_CONFIGS: Record<EnemyKind, EnemyConfig> = {
     attackRange: 150,
     attackMs: 1000,
     animKey: 'enemy-skeleton-walk',
-    scale: 1
+    scale: 3.5
   },
   boss: {
     hp: 300,
@@ -221,7 +234,7 @@ const ENEMY_CONFIGS: Record<EnemyKind, EnemyConfig> = {
     attackRange: 54,
     attackMs: 980,
     animKey: 'enemy-boss-walk',
-    scale: 1.45
+    scale: 6
   }
 };
 
@@ -266,15 +279,97 @@ export default class SurvivalScene extends Phaser.Scene {
   private bladeAngle = 0;
   private muted = false;
 
+  private audio = new AudioController();
+  
+  private dashUntil = 0;
+  private dashCooldown = 0;
+  private dashRing?: Phaser.GameObjects.Arc;
+
+  private dayNightOverlay?: Phaser.GameObjects.Rectangle;
+  private isNight = false;
+
+  private hitParticles?: Phaser.GameObjects.Particles.ParticleEmitter;
+  
+  private baseIndicator?: Phaser.GameObjects.Image;
+  private marketIndicator?: Phaser.GameObjects.Image;
+  
+  private enemyProjectiles: Phaser.GameObjects.Image[] = [];
+
   constructor() {
     super('SurvivalScene');
   }
 
+  preload() {
+    this.load.image('bg-tree', 'assets/kenney/tiny-town/Tiles/tile_0016.png');
+    this.load.image('bg-bush', 'assets/kenney/tiny-town/Tiles/tile_0017.png');
+    this.load.image('bg-rock', 'assets/kenney/tiny-town/Tiles/tile_0028.png');
+
+    this.load.image('player-walk-0', 'assets/kenney/dungeon/Tiles/tile_0084.png');
+    this.load.image('player-walk-1', 'assets/kenney/dungeon/Tiles/tile_0084.png'); // use same tile to prevent shape-shifting
+    
+    this.load.image('enemy-slime-0', 'assets/kenney/dungeon/Tiles/tile_0099.png');
+    this.load.image('enemy-slime-1', 'assets/kenney/dungeon/Tiles/tile_0099.png');
+    
+    this.load.image('enemy-goblin-0', 'assets/kenney/dungeon/Tiles/tile_0100.png');
+    this.load.image('enemy-goblin-1', 'assets/kenney/dungeon/Tiles/tile_0100.png');
+    
+    this.load.image('enemy-skeleton-0', 'assets/kenney/dungeon/Tiles/tile_0109.png');
+    this.load.image('enemy-skeleton-1', 'assets/kenney/dungeon/Tiles/tile_0109.png');
+    
+    this.load.image('enemy-boss-0', 'assets/kenney/dungeon/Tiles/tile_0097.png');
+    this.load.image('enemy-boss-1', 'assets/kenney/dungeon/Tiles/tile_0097.png');
+
+    this.load.image('projectile-bone', 'assets/kenney/dungeon/Tiles/tile_0130.png');
+    
+    this.load.image('defense-healingWard', 'assets/kenney/tiny-town/Tiles/tile_0114.png');
+    this.load.image('defense-tarTrap', 'assets/kenney/dungeon/Tiles/tile_0061.png');
+
+    this.load.image('resource-wood', 'assets/kenney/tiny-town/Tiles/tile_0004.png');
+    this.load.image('resource-stone', 'assets/kenney/dungeon/Tiles/tile_0057.png');
+    this.load.image('resource-iron', 'assets/kenney/dungeon/Tiles/tile_0058.png');
+
+    this.load.image('base', 'assets/kenney/tiny-town/Tiles/tile_0104.png');
+    this.load.image('market', 'assets/kenney/tiny-town/Tiles/tile_0056.png');
+
+    this.load.image('defense-wall', 'assets/kenney/dungeon/Tiles/tile_0012.png');
+    this.load.image('defense-turret', 'assets/kenney/dungeon/Tiles/tile_0038.png');
+    this.load.image('defense-spike', 'assets/kenney/dungeon/Tiles/tile_0068.png');
+
+    this.load.image('blade-wood', 'assets/kenney/dungeon/Tiles/tile_0080.png');
+    this.load.image('blade-iron', 'assets/kenney/dungeon/Tiles/tile_0081.png');
+    this.load.image('blade-dual', 'assets/kenney/dungeon/Tiles/tile_0081.png');
+    this.load.image('blade-fire', 'assets/kenney/dungeon/Tiles/tile_0082.png');
+    this.load.image('blade-lightning', 'assets/kenney/dungeon/Tiles/tile_0083.png');
+    this.load.image('blade-legendary', 'assets/kenney/dungeon/Tiles/tile_0083.png');
+  }
+
   create() {
-    this.prepareTextures();
+    this.anims.create({
+      key: 'player-walk',
+      frames: [{ key: 'player-walk-0' }, { key: 'player-walk-1' }],
+      frameRate: 6,
+      repeat: -1
+    });
+    this.anims.create({ key: 'enemy-slime-walk', frames: [{ key: 'enemy-slime-0' }, { key: 'enemy-slime-1' }], frameRate: 6, repeat: -1 });
+    this.anims.create({ key: 'enemy-goblin-walk', frames: [{ key: 'enemy-goblin-0' }, { key: 'enemy-goblin-1' }], frameRate: 6, repeat: -1 });
+    this.anims.create({ key: 'enemy-skeleton-walk', frames: [{ key: 'enemy-skeleton-0' }, { key: 'enemy-skeleton-1' }], frameRate: 6, repeat: -1 });
+    this.anims.create({ key: 'enemy-boss-walk', frames: [{ key: 'enemy-boss-0' }, { key: 'enemy-boss-1' }], frameRate: 6, repeat: -1 });
+
     this.createWorld();
 
-    this.keys = this.input.keyboard!.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT') as MovementKeys;
+    this.input.on('pointerdown', () => {
+      this.audio.init();
+      if (this.pausedByUi || !this.running || this.deadUntil > this.time.now) return;
+      const ptr = this.input.activePointer;
+      const targetX = ptr.worldX;
+      const targetY = ptr.worldY;
+      const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, targetX, targetY);
+      if (dist > 10) {
+        this.joystick = { x: (targetX - this.player.x) / dist, y: (targetY - this.player.y) / dist };
+      }
+    });
+
+    this.keys = this.input.keyboard!.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE,SHIFT') as MovementKeys;
     this.cameras.main.setBounds(0, 0, WORLD.width, WORLD.height);
     this.cameras.main.startFollow(this.player, true, 0.09, 0.09);
     this.cameras.main.setZoom(1);
@@ -334,531 +429,45 @@ export default class SurvivalScene extends Phaser.Scene {
     this.updateBlades(time, dt);
     this.updateDefenses(time);
     this.updateEnemies(time, dt);
+    this.updateEnemyProjectiles(time, dt);
     this.updateWave(time);
+    this.updateDayNight(time);
+    this.updateIndicators();
     this.emitSnapshot();
   }
 
-  private prepareTextures() {
-    this.makePlayerTextures();
-    this.makeCircleTexture('player-shadow', 32, 0x0b120f, 0x0b120f, 0, 0.25);
-    this.makeBladeTexture('blade-wood', 0xd9a45c);
-    this.makeBladeTexture('blade-iron', 0xd1d5db);
-    this.makeBladeTexture('blade-dual', 0x8bd3dd);
-    this.makeBladeTexture('blade-fire', 0xff7a45);
-    this.makeBladeTexture('blade-lightning', 0xf6e05e);
-    this.makeBladeTexture('blade-legendary', 0xe879f9);
-    this.makeTreeTexture();
-    this.makeRockTexture('resource-stone', 0x9ca3af, 0x606a78);
-    this.makeRockTexture('resource-iron', 0xb5835a, 0x6f4d37);
-    this.makeBaseTexture();
-    this.makeMarketTexture();
-    this.makeDefenseTextures();
-    this.makeEnemyTextures();
-  }
 
-  private makeCircleTexture(
-    key: string,
-    radius: number,
-    fill: number,
-    stroke: number,
-    strokeWidth = 0,
-    alpha = 1
-  ) {
-    if (this.textures.exists(key)) {
-      return;
-    }
-
-    const size = radius * 2 + strokeWidth * 2 + 4;
-    const graphics = this.add.graphics();
-    graphics.fillStyle(fill, alpha);
-    graphics.fillCircle(size / 2, size / 2, radius);
-    if (strokeWidth > 0) {
-      graphics.lineStyle(strokeWidth, stroke, 1);
-      graphics.strokeCircle(size / 2, size / 2, radius);
-    }
-    graphics.generateTexture(key, size, size);
-    graphics.destroy();
-  }
-
-  private makePlayerTextures() {
-    if (this.textures.exists('player-walk-0')) {
-      return;
-    }
-
-    const w = 56;
-    const h = 64;
-    const cx = w / 2;
-    const cy = h / 2 - 2;
-
-    const drawBase = (g: Phaser.GameObjects.Graphics) => {
-      g.fillStyle(0x2563eb, 1);
-      g.fillRoundedRect(cx - 9, cy + 2, 18, 18, 3);
-
-      g.fillStyle(0xfbbf24, 1);
-      g.fillCircle(cx, cy - 6, 12);
-
-      g.fillStyle(0x2d1a0e, 1);
-      g.fillRect(cx - 12, cy - 12, 24, 8);
-
-      g.fillStyle(0xfbbf24, 1);
-      g.fillRect(cx - 16, cy + 4, 7, 5);
-      g.fillRect(cx + 9, cy + 4, 7, 5);
-
-      g.fillStyle(0x1f2937, 1);
-      g.fillCircle(cx - 4, cy - 7, 2);
-      g.fillCircle(cx + 4, cy - 7, 2);
-
-      g.fillStyle(0xfca5a5, 1);
-      g.fillRect(cx - 2, cy - 3, 4, 2);
-    };
-
-    const drawLegs = (g: Phaser.GameObjects.Graphics, leftOff: number, rightOff: number) => {
-      g.fillStyle(0x1e40af, 1);
-      g.fillRect(cx - 7, cy + 20 + leftOff, 6, 10);
-      g.fillRect(cx + 1, cy + 20 + rightOff, 6, 10);
-      g.fillStyle(0x3f2921, 1);
-      g.fillRect(cx - 8, cy + 28 + leftOff, 7, 3);
-      g.fillRect(cx + 1, cy + 28 + rightOff, 7, 3);
-    };
-
-    let g = this.add.graphics();
-    g.fillStyle(0x0b120f, 0.15);
-    g.fillEllipse(cx, cy + 36, 38, 10);
-    drawBase(g);
-    drawLegs(g, -3, 3);
-    g.generateTexture('player-walk-0', w, h);
-    g.destroy();
-
-    g = this.add.graphics();
-    g.fillStyle(0x0b120f, 0.15);
-    g.fillEllipse(cx, cy + 36, 38, 10);
-    drawBase(g);
-    drawLegs(g, 3, -3);
-    g.generateTexture('player-walk-1', w, h);
-    g.destroy();
-
-    this.anims.create({
-      key: 'player-walk',
-      frames: [{ key: 'player-walk-0' }, { key: 'player-walk-1' }],
-      frameRate: 8,
-      repeat: -1
-    });
-  }
-
-  private makeBladeTexture(key: string, fill: number) {
-    if (this.textures.exists(key)) {
-      return;
-    }
-
-    const g = this.add.graphics();
-    const w = 92;
-    const h = 30;
-
-    g.fillStyle(0xffffff, 0.08);
-    g.fillRoundedRect(14, 4, 74, 22, 6);
-
-    g.fillStyle(fill, 1);
-    g.lineStyle(2, 0xffffff, 0.3);
-    g.beginPath();
-    g.moveTo(22, 6);
-    g.lineTo(82, 11);
-    g.lineTo(88, 15);
-    g.lineTo(82, 19);
-    g.lineTo(22, 24);
-    g.closePath();
-    g.fillPath();
-    g.strokePath();
-
-    g.lineStyle(1, 0xffffff, 0.12);
-    g.lineBetween(22, 15, 86, 15);
-
-    g.fillStyle(0x8a6d3b, 1);
-    g.fillRect(18, 0, 8, 30);
-    g.lineStyle(1, 0xd4a84b, 0.6);
-    g.strokeRect(18, 0, 8, 30);
-
-    g.fillStyle(0x3f2921, 1);
-    g.fillRoundedRect(0, 9, 20, 12, 3);
-
-    g.lineStyle(1, 0x5c3a21, 1);
-    g.lineBetween(5, 9, 5, 21);
-    g.lineBetween(10, 9, 10, 21);
-    g.lineBetween(15, 9, 15, 21);
-
-    g.generateTexture(key, w, h);
-    g.destroy();
-  }
-
-  private makeTreeTexture() {
-    if (this.textures.exists('resource-wood')) {
-      return;
-    }
-
-    const graphics = this.add.graphics();
-    graphics.fillStyle(0x7a4f2a, 1);
-    graphics.fillRoundedRect(28, 38, 10, 22, 3);
-    graphics.fillStyle(0x2c7a44, 1);
-    graphics.fillCircle(33, 28, 27);
-    graphics.fillStyle(0x4caf59, 1);
-    graphics.fillCircle(22, 23, 14);
-    graphics.fillCircle(44, 20, 16);
-    graphics.fillCircle(36, 40, 14);
-    graphics.lineStyle(3, 0x154d2c, 0.9);
-    graphics.strokeCircle(33, 28, 27);
-    graphics.generateTexture('resource-wood', 68, 68);
-    graphics.destroy();
-  }
-
-  private makeRockTexture(key: string, fill: number, shadow: number) {
-    if (this.textures.exists(key)) {
-      return;
-    }
-
-    const graphics = this.add.graphics();
-    graphics.fillStyle(shadow, 1);
-    graphics.fillPoints(
-      [
-        new Phaser.Geom.Point(12, 40),
-        new Phaser.Geom.Point(24, 12),
-        new Phaser.Geom.Point(48, 10),
-        new Phaser.Geom.Point(58, 34),
-        new Phaser.Geom.Point(43, 56),
-        new Phaser.Geom.Point(20, 54)
-      ],
-      true
-    );
-    graphics.fillStyle(fill, 1);
-    graphics.fillPoints(
-      [
-        new Phaser.Geom.Point(17, 35),
-        new Phaser.Geom.Point(27, 17),
-        new Phaser.Geom.Point(44, 16),
-        new Phaser.Geom.Point(53, 33),
-        new Phaser.Geom.Point(40, 48),
-        new Phaser.Geom.Point(23, 47)
-      ],
-      true
-    );
-    graphics.generateTexture(key, 68, 68);
-    graphics.destroy();
-  }
-
-  private makeBaseTexture() {
-    if (this.textures.exists('base')) {
-      return;
-    }
-
-    const graphics = this.add.graphics();
-    graphics.fillStyle(0x3b2f2f, 1);
-    graphics.fillRoundedRect(10, 25, 84, 66, 8);
-    graphics.fillStyle(0xd69d58, 1);
-    graphics.fillPoints(
-      [
-        new Phaser.Geom.Point(4, 30),
-        new Phaser.Geom.Point(52, 0),
-        new Phaser.Geom.Point(100, 30)
-      ],
-      true
-    );
-    graphics.fillStyle(0x84cc87, 1);
-    graphics.fillRoundedRect(40, 54, 24, 37, 4);
-    graphics.lineStyle(4, 0x211717, 1);
-    graphics.strokeRoundedRect(10, 25, 84, 66, 8);
-    graphics.generateTexture('base', 104, 98);
-    graphics.destroy();
-  }
-
-  private makeMarketTexture() {
-    if (this.textures.exists('market')) {
-      return;
-    }
-
-    const graphics = this.add.graphics();
-    graphics.fillStyle(0x5a4636, 1);
-    graphics.fillRoundedRect(9, 28, 68, 48, 6);
-    graphics.fillStyle(0xf2c15d, 1);
-    graphics.fillRect(12, 20, 12, 16);
-    graphics.fillStyle(0xe35d5b, 1);
-    graphics.fillRect(24, 20, 13, 16);
-    graphics.fillStyle(0xf2c15d, 1);
-    graphics.fillRect(37, 20, 13, 16);
-    graphics.fillStyle(0xe35d5b, 1);
-    graphics.fillRect(50, 20, 13, 16);
-    graphics.fillStyle(0xf2c15d, 1);
-    graphics.fillRect(63, 20, 12, 16);
-    graphics.fillStyle(0x8bd3dd, 1);
-    graphics.fillRoundedRect(28, 48, 30, 28, 4);
-    graphics.lineStyle(3, 0x32241d, 1);
-    graphics.strokeRoundedRect(9, 28, 68, 48, 6);
-    graphics.generateTexture('market', 86, 84);
-    graphics.destroy();
-  }
-
-  private makeDefenseTextures() {
-    if (!this.textures.exists('defense-wall')) {
-      const wall = this.add.graphics();
-      wall.fillStyle(0x9f7a4d, 1);
-      wall.fillRoundedRect(5, 12, 62, 36, 6);
-      wall.lineStyle(4, 0x513a25, 1);
-      wall.strokeRoundedRect(5, 12, 62, 36, 6);
-      wall.lineStyle(2, 0x6e5131, 1);
-      wall.lineBetween(19, 13, 19, 47);
-      wall.lineBetween(35, 13, 35, 47);
-      wall.lineBetween(51, 13, 51, 47);
-      wall.generateTexture('defense-wall', 72, 60);
-      wall.destroy();
-    }
-
-    if (!this.textures.exists('defense-turret')) {
-      const turret = this.add.graphics();
-      turret.fillStyle(0x334155, 1);
-      turret.fillCircle(32, 34, 22);
-      turret.fillStyle(0x8bd3dd, 1);
-      turret.fillRoundedRect(29, 4, 8, 34, 4);
-      turret.lineStyle(3, 0x111827, 1);
-      turret.strokeCircle(32, 34, 22);
-      turret.generateTexture('defense-turret', 66, 66);
-      turret.destroy();
-    }
-
-    if (!this.textures.exists('defense-spike')) {
-      const spike = this.add.graphics();
-      spike.fillStyle(0x6b7280, 1);
-      for (let i = 0; i < 4; i += 1) {
-        const x = 10 + i * 13;
-        spike.fillTriangle(x, 52, x + 6, 14, x + 12, 52);
-      }
-      spike.lineStyle(2, 0xf3f4f6, 0.8);
-      spike.strokeRect(6, 50, 58, 8);
-      spike.generateTexture('defense-spike', 70, 64);
-      spike.destroy();
-    }
-  }
-
-  private makeEnemyTextures() {
-    if (!this.textures.exists('enemy-slime-0')) {
-      let g = this.add.graphics();
-      g.fillStyle(0x58bf60, 1);
-      g.fillEllipse(30, 32, 54, 40);
-      g.fillStyle(0x70d878, 1);
-      g.fillEllipse(30, 30, 46, 32);
-      g.fillStyle(0x123d2d, 1);
-      g.fillCircle(21, 26, 4);
-      g.fillCircle(39, 26, 4);
-      g.fillStyle(0xfef2f2, 1);
-      g.fillCircle(20, 25, 1.5);
-      g.fillCircle(38, 25, 1.5);
-      g.fillStyle(0x123d2d, 1);
-      g.fillEllipse(30, 34, 10, 5);
-      g.lineStyle(2, 0x236b3c, 0.8);
-      g.strokeEllipse(30, 32, 54, 40);
-      g.generateTexture('enemy-slime-0', 62, 56);
-      g.destroy();
-
-      g = this.add.graphics();
-      g.fillStyle(0x58bf60, 1);
-      g.fillEllipse(30, 30, 46, 46);
-      g.fillStyle(0x70d878, 1);
-      g.fillEllipse(30, 28, 40, 38);
-      g.fillStyle(0x123d2d, 1);
-      g.fillCircle(22, 24, 4);
-      g.fillCircle(38, 24, 4);
-      g.fillStyle(0xfef2f2, 1);
-      g.fillCircle(21, 23, 1.5);
-      g.fillCircle(37, 23, 1.5);
-      g.fillStyle(0x123d2d, 1);
-      g.fillEllipse(30, 32, 8, 4);
-      g.lineStyle(2, 0x236b3c, 0.8);
-      g.strokeEllipse(30, 30, 46, 46);
-      g.generateTexture('enemy-slime-1', 62, 56);
-      g.destroy();
-
-      this.anims.create({
-        key: 'enemy-slime-walk',
-        frames: [{ key: 'enemy-slime-0' }, { key: 'enemy-slime-1' }],
-        frameRate: 6,
-        repeat: -1
-      });
-    }
-
-    if (!this.textures.exists('enemy-goblin-0')) {
-      const size = 64;
-      const cx = size / 2;
-
-      const drawGoblinBody = (g: Phaser.GameObjects.Graphics) => {
-        g.fillStyle(0x7cb342, 1);
-        g.fillCircle(cx - 2, 22, 16);
-        g.fillStyle(0x689f38, 1);
-        g.fillRoundedRect(cx - 14, 37, 28, 20, 3);
-        g.fillStyle(0x7cb342, 1);
-        g.fillTriangle(cx - 24, 22, cx - 32, 10, cx - 14, 28);
-        g.fillTriangle(cx + 20, 22, cx + 30, 10, cx + 18, 28);
-        g.fillStyle(0x689f38, 1);
-        g.fillTriangle(cx - 26, 18, cx - 32, 8, cx - 16, 24);
-        g.fillTriangle(cx + 22, 18, cx + 30, 8, cx + 16, 24);
-        g.fillStyle(0x1f2937, 1);
-        g.fillCircle(cx - 10, 20, 3);
-        g.fillCircle(cx + 6, 20, 3);
-        g.fillStyle(0xfef2f2, 1);
-        g.fillCircle(cx - 11, 19, 1);
-        g.fillCircle(cx + 5, 19, 1);
-        g.fillStyle(0x991b1b, 1);
-        g.fillRect(cx - 8, 28, 12, 3);
-      };
-
-      let g = this.add.graphics();
-      drawGoblinBody(g);
-      g.fillStyle(0x3f2921, 1);
-      g.fillRect(cx - 22, 40, 6, 18);
-      g.fillRect(cx + 12, 40, 6, 18);
-      g.fillStyle(0x57534e, 1);
-      g.fillRect(cx - 24, 56, 10, 4);
-      g.fillRect(cx + 10, 56, 10, 4);
-      g.generateTexture('enemy-goblin-0', size, size);
-      g.destroy();
-
-      g = this.add.graphics();
-      drawGoblinBody(g);
-      g.fillStyle(0x3f2921, 1);
-      g.fillRect(cx - 24, 38, 6, 18);
-      g.fillRect(cx + 14, 38, 6, 18);
-      g.fillStyle(0x57534e, 1);
-      g.fillRect(cx - 26, 54, 10, 4);
-      g.fillRect(cx + 12, 54, 10, 4);
-      g.generateTexture('enemy-goblin-1', size, size);
-      g.destroy();
-
-      this.anims.create({
-        key: 'enemy-goblin-walk',
-        frames: [{ key: 'enemy-goblin-0' }, { key: 'enemy-goblin-1' }],
-        frameRate: 8,
-        repeat: -1
-      });
-    }
-
-    if (!this.textures.exists('enemy-skeleton-0')) {
-      const size = 56;
-      const cx = size / 2;
-
-      const drawSkeletonBody = (g: Phaser.GameObjects.Graphics) => {
-        g.fillStyle(0xe7e5d9, 1);
-        g.fillCircle(cx, 20, 14);
-        g.fillStyle(0x1f2937, 1);
-        g.fillCircle(cx - 5, 18, 3);
-        g.fillCircle(cx + 5, 18, 3);
-        g.fillRect(cx - 6, 24, 12, 3);
-        g.fillStyle(0xd4d2c4, 1);
-        g.fillRoundedRect(cx - 12, 34, 24, 16, 3);
-        g.lineStyle(3, 0xe7e5d9, 1);
-        g.lineBetween(cx - 20, 38, cx + 16, 38);
-        g.lineBetween(cx + 8, 50, cx + 8, 60);
-      };
-
-      let g = this.add.graphics();
-      drawSkeletonBody(g);
-      g.lineStyle(3, 0xe7e5d9, 1);
-      g.lineBetween(cx - 18, 44, cx - 12, 54);
-      g.lineBetween(cx + 14, 44, cx + 8, 54);
-      g.fillStyle(0xbab8aa, 1);
-      g.fillRect(cx - 18, 52, 6, 4);
-      g.fillRect(cx + 6, 52, 6, 4);
-      g.fillRect(cx - 22, 36, 4, 6);
-      g.fillRect(cx + 14, 36, 4, 6);
-      g.generateTexture('enemy-skeleton-0', size, 64);
-      g.destroy();
-
-      g = this.add.graphics();
-      drawSkeletonBody(g);
-      g.lineStyle(3, 0xe7e5d9, 1);
-      g.lineBetween(cx - 20, 42, cx - 18, 54);
-      g.lineBetween(cx + 16, 42, cx + 12, 54);
-      g.fillStyle(0xbab8aa, 1);
-      g.fillRect(cx - 22, 52, 6, 4);
-      g.fillRect(cx + 10, 52, 6, 4);
-      g.fillRect(cx - 22, 36, 4, 6);
-      g.fillRect(cx + 14, 36, 4, 6);
-      g.generateTexture('enemy-skeleton-1', size, 64);
-      g.destroy();
-
-      this.anims.create({
-        key: 'enemy-skeleton-walk',
-        frames: [{ key: 'enemy-skeleton-0' }, { key: 'enemy-skeleton-1' }],
-        frameRate: 7,
-        repeat: -1
-      });
-    }
-
-    if (!this.textures.exists('enemy-boss-0')) {
-      const size = 76;
-      const cx = size / 2;
-
-      const drawBossBody = (g: Phaser.GameObjects.Graphics) => {
-        g.fillStyle(0x7f1d1d, 1);
-        g.fillCircle(cx, cx, 32);
-        g.fillStyle(0x9f1239, 1);
-        g.fillCircle(cx, cx - 2, 28);
-        g.fillStyle(0xdc2626, 1);
-        g.fillTriangle(cx - 20, cx - 22, cx - 28, cx - 36, cx - 4, cx - 20);
-        g.fillTriangle(cx + 20, cx - 22, cx + 30, cx - 36, cx + 4, cx - 20);
-        g.fillStyle(0x991b1b, 1);
-        g.fillTriangle(cx - 22, cx - 26, cx - 30, cx - 34, cx - 8, cx - 22);
-        g.fillTriangle(cx + 22, cx - 26, cx + 32, cx - 34, cx + 8, cx - 22);
-        g.fillStyle(0xfef2f2, 1);
-        g.fillCircle(cx - 12, cx - 6, 5);
-        g.fillCircle(cx + 12, cx - 6, 5);
-        g.fillStyle(0x3f0f1a, 1);
-        g.fillCircle(cx - 13, cx - 7, 2.5);
-        g.fillCircle(cx + 11, cx - 7, 2.5);
-        g.fillStyle(0xfca5a5, 1);
-        g.fillRoundedRect(cx - 14, cx + 8, 28, 6, 2);
-        g.fillStyle(0xfef2f2, 1);
-        g.fillRect(cx - 6, cx + 8, 12, 6);
-        g.lineStyle(2, 0xdc2626, 0.6);
-        g.strokeCircle(cx, cx - 2, 28);
-      };
-
-      let g = this.add.graphics();
-      drawBossBody(g);
-      g.fillStyle(0x3f2921, 1);
-      g.fillRect(cx - 28, cx + 20, 10, 16);
-      g.fillRect(cx + 14, cx + 20, 10, 16);
-      g.fillStyle(0x57534e, 1);
-      g.fillRect(cx - 30, cx + 34, 12, 5);
-      g.fillRect(cx + 14, cx + 34, 12, 5);
-      g.generateTexture('enemy-boss-0', size, size + 8);
-      g.destroy();
-
-      g = this.add.graphics();
-      drawBossBody(g);
-      g.fillStyle(0x3f2921, 1);
-      g.fillRect(cx - 30, cx + 18, 10, 16);
-      g.fillRect(cx + 16, cx + 18, 10, 16);
-      g.fillStyle(0x57534e, 1);
-      g.fillRect(cx - 32, cx + 32, 12, 5);
-      g.fillRect(cx + 16, cx + 32, 12, 5);
-      g.generateTexture('enemy-boss-1', size, size + 8);
-      g.destroy();
-
-      this.anims.create({
-        key: 'enemy-boss-walk',
-        frames: [{ key: 'enemy-boss-0' }, { key: 'enemy-boss-1' }],
-        frameRate: 6,
-        repeat: -1
-      });
-    }
-  }
 
   private createWorld() {
     this.createBackground();
 
     this.baseRing = this.add.circle(PLAYER_START.x, PLAYER_START.y, 176, 0x2f6f53, 0.13);
     this.baseRing.setStrokeStyle(3, 0x6ee7b7, 0.45).setDepth(0.6);
-    this.base = this.add.image(PLAYER_START.x, PLAYER_START.y, 'base').setDepth(2);
-    this.market = this.add.image(MARKET_POS.x, MARKET_POS.y, 'market').setDepth(2);
+    this.base = this.add.image(PLAYER_START.x, PLAYER_START.y, 'base').setDepth(2).setScale(6);
+    this.market = this.add.image(MARKET_POS.x, MARKET_POS.y, 'market').setDepth(2).setScale(5);
 
-    this.player = this.add.sprite(PLAYER_START.x, PLAYER_START.y + 80, 'player-walk-0').setDepth(5);
+    this.dashRing = this.add.circle(PLAYER_START.x, PLAYER_START.y + 24, 16, 0x3b82f6, 0).setDepth(4.1);
+    this.dashRing.setStrokeStyle(3, 0x3b82f6, 1);
+
+    this.player = this.add.sprite(PLAYER_START.x, PLAYER_START.y + 80, 'player-walk-0').setDepth(5).setScale(3.5);
     this.player.play('player-walk');
-    this.add.image(this.player.x, this.player.y + 8, 'player-shadow').setDepth(4).setName('player-shadow');
+    this.add.ellipse(this.player.x, this.player.y + 24, 36, 12, 0x000000, 0.4).setDepth(4).setName('player-shadow');
+
+    this.dayNightOverlay = this.add.rectangle(WORLD.width / 2, WORLD.height / 2, WORLD.width, WORLD.height, 0x050814, 0)
+      .setDepth(999)
+      .setBlendMode(Phaser.BlendModes.MULTIPLY);
+
+    this.hitParticles = this.add.particles(0, 0, 'projectile-bone', {
+      scale: { start: 1, end: 0 },
+      alpha: { start: 1, end: 0 },
+      speed: { min: 50, max: 200 },
+      lifespan: 400,
+      blendMode: 'ADD',
+      emitting: false
+    }).setDepth(100);
+
+    this.baseIndicator = this.add.image(0, 0, 'base').setScale(2).setDepth(1000).setAlpha(0.6).setVisible(false);
+    this.marketIndicator = this.add.image(0, 0, 'market').setScale(2).setDepth(1000).setAlpha(0.6).setVisible(false);
 
     this.spawnResources();
     this.ensureBladeSprites();
@@ -974,6 +583,40 @@ export default class SurvivalScene extends Phaser.Scene {
       g.generateTexture('map-bg', 1, 1);
     }
     g.setDepth(0);
+
+    // Scatter props (trees, bushes, rocks)
+    for (let i = 0; i < 400; i++) {
+      const x = rng.between(20, WORLD.width - 20);
+      const y = rng.between(20, WORLD.height - 20);
+      
+      // Keep clear area around base and market
+      const distBase = Phaser.Math.Distance.Between(x, y, PLAYER_START.x, PLAYER_START.y);
+      const distMarket = Phaser.Math.Distance.Between(x, y, MARKET_POS.x, MARKET_POS.y);
+      if (distBase < 280 || distMarket < 220) continue;
+
+      const propType = rng.between(0, 100);
+      let key = 'bg-bush';
+      let scale = rng.realInRange(2, 3);
+      
+      if (propType < 40) {
+        key = 'bg-tree';
+        scale = rng.realInRange(2.5, 4);
+      } else if (propType < 55) {
+        key = 'bg-rock';
+        scale = rng.realInRange(1.5, 2.5);
+      }
+
+      const img = this.add.image(x, y, key).setScale(scale).setDepth(0.5);
+      
+      // Randomly tint trees/bushes for variety
+      if (key === 'bg-tree' || key === 'bg-bush') {
+        const shade = rng.between(150, 255);
+        img.setTint(Phaser.Display.Color.GetColor(shade, 255, shade));
+      } else {
+        const shade = rng.between(200, 255);
+        img.setTint(Phaser.Display.Color.GetColor(shade, shade, shade));
+      }
+    }
   }
 
   private spawnResources() {
@@ -1003,9 +646,10 @@ export default class SurvivalScene extends Phaser.Scene {
 
     const sprite = this.add
       .image(x, y, type === 'wood' ? 'resource-wood' : type === 'stone' ? 'resource-stone' : 'resource-iron')
-      .setDepth(2);
+      .setDepth(2)
+      .setScale(4);
     if (type === 'iron') {
-      sprite.setScale(0.94);
+      sprite.setTint(0xbbbbbb);
     }
 
     this.resources.push({
@@ -1145,6 +789,51 @@ export default class SurvivalScene extends Phaser.Scene {
     if (!this.running || this.pausedByUi) {
       return;
     }
+    const cost = 25;
+    if (this.hp >= this.maxHp) {
+      this.showMessage('HP sudah penuh.');
+      return;
+    }
+    if (this.coins < cost) {
+      this.showMessage(`Butuh ${cost} koin untuk heal.`);
+      return;
+    }
+    this.coins -= cost;
+    this.hp = Math.min(this.maxHp, this.hp + 40);
+    this.spawnRing(this.player.x, this.player.y, 0x6ee7b7);
+    this.showMessage('Player disembuhkan.');
+    this.emitSnapshot(true);
+  }
+
+  private damagePlayer(amount: number) {
+    if (this.deadUntil > 0) return;
+    this.hp -= amount;
+    this.audio.playHit();
+    this.cameras.main.shake(100, 0.01);
+    this.player.setTint(0xffadad);
+    this.time.delayedCall(150, () => this.player.clearTint());
+    if (this.hp <= 0) {
+      this.killPlayer();
+    }
+  }
+
+  private damageBase(amount: number) {
+    this.baseHp -= amount;
+    this.cameras.main.shake(150, 0.02);
+    this.base.setTint(0xffadad);
+    this.time.delayedCall(150, () => this.base.clearTint());
+    if (this.baseHp <= 0) {
+      this.running = false;
+      this.message = 'Base Hancur! Anda kalah.';
+      this.audio.playGameOver();
+      this.emitSnapshot(true);
+    }
+  }
+
+  private killPlayer() {
+    if (!this.running || this.pausedByUi) {
+      return;
+    }
 
     const cost: Cost = { coins: 55 };
     if (this.hp >= this.maxHp) {
@@ -1183,12 +872,9 @@ export default class SurvivalScene extends Phaser.Scene {
     this.payCost(cost);
     const stats = this.getDefenseStats(type);
     const texture = type === 'wall' ? 'defense-wall' : type === 'turret' ? 'defense-turret' : 'defense-spike';
-    const sprite = this.add.image(placement.x, placement.y, texture).setDepth(3);
-    if (type === 'wall') {
-      sprite.setScale(0.95);
-    }
+    const sprite = this.add.image(placement.x, placement.y, texture).setDepth(3).setScale(4);
     if (type === 'spike') {
-      sprite.setScale(0.85);
+      sprite.setScale(3.5);
     }
 
     this.defenses.push({
@@ -1216,28 +902,34 @@ export default class SurvivalScene extends Phaser.Scene {
 
   private updatePlayer(dt: number) {
     const move = new Phaser.Math.Vector2(0, 0);
-    if (this.keys.W.isDown || this.keys.UP.isDown) {
-      move.y -= 1;
-    }
-    if (this.keys.S.isDown || this.keys.DOWN.isDown) {
-      move.y += 1;
-    }
-    if (this.keys.A.isDown || this.keys.LEFT.isDown) {
-      move.x -= 1;
-    }
-    if (this.keys.D.isDown || this.keys.RIGHT.isDown) {
-      move.x += 1;
-    }
+    if (this.keys.W.isDown || this.keys.UP.isDown) move.y -= 1;
+    if (this.keys.S.isDown || this.keys.DOWN.isDown) move.y += 1;
+    if (this.keys.A.isDown || this.keys.LEFT.isDown) move.x -= 1;
+    if (this.keys.D.isDown || this.keys.RIGHT.isDown) move.x += 1;
 
     if (Math.abs(this.joystick.x) > 0.08 || Math.abs(this.joystick.y) > 0.08) {
       move.x += this.joystick.x;
       move.y += this.joystick.y;
     }
 
+    const isDashing = this.time.now < this.dashUntil;
+    if (!isDashing && (this.keys.SPACE.isDown || this.keys.SHIFT.isDown) && this.time.now > this.dashCooldown && move.lengthSq() > 0) {
+      this.dashUntil = this.time.now + 200;
+      this.dashCooldown = this.time.now + 2000;
+      this.audio.playDash();
+    }
+    
+    if (this.dashRing) {
+      this.dashRing.setPosition(this.player.x, this.player.y + 24);
+      this.dashRing.setStrokeStyle(3, 0x3b82f6, this.time.now < this.dashCooldown ? 0.2 : 1);
+    }
+
+    const speedMult = isDashing ? 3 : 1;
+
     if (move.lengthSq() > 0) {
       move.normalize();
-      this.player.x = Phaser.Math.Clamp(this.player.x + move.x * this.playerSpeed * dt, 50, WORLD.width - 50);
-      this.player.y = Phaser.Math.Clamp(this.player.y + move.y * this.playerSpeed * dt, 50, WORLD.height - 50);
+      this.player.x = Phaser.Math.Clamp(this.player.x + move.x * this.playerSpeed * speedMult * dt, 50, WORLD.width - 50);
+      this.player.y = Phaser.Math.Clamp(this.player.y + move.y * this.playerSpeed * speedMult * dt, 50, WORLD.height - 50);
       this.player.setRotation(move.x * 0.08);
       if (!this.player.anims.isPlaying) {
         this.player.play('player-walk');
@@ -1252,9 +944,64 @@ export default class SurvivalScene extends Phaser.Scene {
     this.updatePlayerShadow();
   }
 
+  private updateDayNight(time: number) {
+    if (!this.dayNightOverlay) return;
+    const cyclePeriod = 80000; 
+    const phase = (time % cyclePeriod) / cyclePeriod;
+    const darkness = Math.max(0, Math.sin(phase * Math.PI * 2));
+    this.dayNightOverlay.setAlpha(darkness * 0.85);
+    this.isNight = darkness > 0.4;
+  }
+
+  private updateIndicators() {
+    if (!this.baseIndicator || !this.marketIndicator) return;
+    const cam = this.cameras.main;
+    const padding = 30;
+    
+    const updateInd = (ind: Phaser.GameObjects.Image, target: {x:number,y:number}) => {
+      const bounds = cam.worldView;
+      if (bounds.contains(target.x, target.y)) {
+        ind.setVisible(false);
+      } else {
+        ind.setVisible(true);
+        ind.x = Phaser.Math.Clamp(target.x, bounds.left + padding, bounds.right - padding);
+        ind.y = Phaser.Math.Clamp(target.y, bounds.top + padding, bounds.bottom - padding);
+      }
+    };
+    updateInd(this.baseIndicator, PLAYER_START);
+    updateInd(this.marketIndicator, MARKET_POS);
+  }
+
+  private updateEnemyProjectiles(time: number, dt: number) {
+    for (let i = this.enemyProjectiles.length - 1; i >= 0; i--) {
+      const proj = this.enemyProjectiles[i];
+      proj.x += proj.getData('vx') * dt;
+      proj.y += proj.getData('vy') * dt;
+      proj.setRotation(proj.rotation + 10 * dt);
+      
+      const life = proj.getData('life');
+      if (time > life) {
+        proj.destroy();
+        this.enemyProjectiles.splice(i, 1);
+        continue;
+      }
+      
+      const dist = Phaser.Math.Distance.Between(proj.x, proj.y, this.player.x, this.player.y);
+      if (dist < 30) {
+        this.damagePlayer(proj.getData('damage'));
+        proj.destroy();
+        this.enemyProjectiles.splice(i, 1);
+      } else if (Phaser.Math.Distance.Between(proj.x, proj.y, PLAYER_START.x, PLAYER_START.y) < 170) {
+        this.damageBase(proj.getData('damage'));
+        proj.destroy();
+        this.enemyProjectiles.splice(i, 1);
+      }
+    }
+  }
+
   private updatePlayerShadow() {
-    const shadow = this.children.getByName('player-shadow') as Phaser.GameObjects.Image | null;
-    shadow?.setPosition(this.player.x, this.player.y + 9);
+    const shadow = this.children.getByName('player-shadow') as Phaser.GameObjects.Ellipse | null;
+    shadow?.setPosition(this.player.x, this.player.y + 24);
   }
 
   private updateBlades(time: number, dt: number) {
@@ -1294,6 +1041,26 @@ export default class SurvivalScene extends Phaser.Scene {
         const critical = Math.random() < blade.criticalChance;
         const damage = critical ? blade.damage * 2 : blade.damage;
         this.damageEnemy(enemy, damage, critical, blade.knockback);
+
+        if (this.hitParticles) {
+          this.hitParticles.emitParticleAt(enemy.sprite.x, enemy.sprite.y, 3);
+        }
+
+        if (blade.element === 'fire') {
+          enemy.burnUntil = time + 3000;
+          enemy.lastBurnTick = time;
+        } else if (blade.element === 'lightning') {
+          const targets = [...this.enemies]
+            .filter((e) => e.id !== enemy.id && Phaser.Math.Distance.Between(e.sprite.x, e.sprite.y, enemy.sprite.x, enemy.sprite.y) <= 160)
+            .sort((a, b) => Phaser.Math.Distance.Between(a.sprite.x, a.sprite.y, enemy.sprite.x, enemy.sprite.y) - Phaser.Math.Distance.Between(b.sprite.x, b.sprite.y, enemy.sprite.x, enemy.sprite.y))
+            .slice(0, 2);
+          
+          for (const t of targets) {
+            t.lastBladeHit = time;
+            this.damageEnemy(t, damage * 0.5, false, 0, enemy.sprite.x, enemy.sprite.y);
+            this.drawShot(enemy.sprite.x, enemy.sprite.y, t.sprite.x, t.sprite.y, 0xf6e05e);
+          }
+        }
       }
     }
   }
@@ -1307,6 +1074,9 @@ export default class SurvivalScene extends Phaser.Scene {
       if (Phaser.Math.Distance.Between(bladeX, bladeY, resource.sprite.x, resource.sprite.y) <= 44) {
         resource.lastBladeHit = time;
         resource.hp -= blade.damage;
+        if (this.hitParticles) {
+          this.hitParticles.emitParticleAt(resource.sprite.x, resource.sprite.y, 2);
+        }
         resource.sprite.setTint(0xffffff);
         this.time.delayedCall(80, () => resource.sprite.clearTint());
         this.spawnRing(resource.sprite.x, resource.sprite.y, RESOURCE_COLORS[resource.type]);
@@ -1349,6 +1119,19 @@ export default class SurvivalScene extends Phaser.Scene {
           }
         }
       }
+
+      if (defense.type === 'healingWard') {
+        if (time - defense.lastAttack >= 1500) {
+          defense.lastAttack = time;
+          if (Phaser.Math.Distance.Between(defense.sprite.x, defense.sprite.y, this.player.x, this.player.y) <= 140) {
+            if (this.hp < this.maxHp) {
+              this.hp = Math.min(this.maxHp, this.hp + 2);
+              this.spawnRing(this.player.x, this.player.y, 0x6ee7b7);
+              this.emitSnapshot();
+            }
+          }
+        }
+      }
     }
 
     if (destroyed.length > 0) {
@@ -1366,18 +1149,42 @@ export default class SurvivalScene extends Phaser.Scene {
         continue;
       }
 
+      if (enemy.burnUntil && time < enemy.burnUntil) {
+        if (time - (enemy.lastBurnTick || 0) >= 500) {
+          enemy.lastBurnTick = time;
+          this.damageEnemy(enemy, 5, false, 0);
+        }
+      }
+
       const target = this.findEnemyTarget(enemy);
       const distance = Phaser.Math.Distance.Between(enemy.sprite.x, enemy.sprite.y, target.x, target.y);
+      const isRanged = enemy.kind === 'skeleton';
+      const effectiveRange = isRanged ? 280 : enemy.attackRange;
 
-      if (distance <= enemy.attackRange) {
+      if (distance <= effectiveRange) {
         if (time - enemy.lastAttack >= enemy.attackMs) {
           enemy.lastAttack = time;
-          this.applyEnemyAttack(enemy, target);
+          if (isRanged) {
+            this.fireEnemyProjectile(enemy, target);
+          } else {
+            this.applyEnemyAttack(enemy, target);
+          }
         }
       } else {
         const angle = Phaser.Math.Angle.Between(enemy.sprite.x, enemy.sprite.y, target.x, target.y);
-        enemy.sprite.x += Math.cos(angle) * enemy.speed * dt;
-        enemy.sprite.y += Math.sin(angle) * enemy.speed * dt;
+        let speed = enemy.speed;
+
+        for (const defense of this.defenses) {
+          if (defense.type === 'tarTrap' && Phaser.Math.Distance.Between(defense.sprite.x, defense.sprite.y, enemy.sprite.x, enemy.sprite.y) <= 60) {
+            speed *= 0.4;
+            break;
+          }
+        }
+
+        if (this.isNight) speed *= 1.2;
+
+        enemy.sprite.x += Math.cos(angle) * speed * dt;
+        enemy.sprite.y += Math.sin(angle) * speed * dt;
       }
 
       enemy.sprite.x += enemy.knockX * dt;
@@ -1466,8 +1273,20 @@ export default class SurvivalScene extends Phaser.Scene {
     const angle = Phaser.Math.Angle.Between(sourceX, sourceY, enemy.sprite.x, enemy.sprite.y);
     enemy.knockX += Math.cos(angle) * knockback * 2.5;
     enemy.knockY += Math.sin(angle) * knockback * 2.5;
-    enemy.sprite.setTint(critical ? 0xfef08a : 0xffffff);
-    this.time.delayedCall(75, () => enemy.sprite.clearTint());
+    
+    if (enemy.burnUntil && this.time.now < enemy.burnUntil) {
+      enemy.sprite.setTint(0xf97316);
+    } else {
+      enemy.sprite.setTint(critical ? 0xfef08a : 0xffffff);
+    }
+    
+    this.time.delayedCall(75, () => {
+      if (enemy.burnUntil && this.time.now < enemy.burnUntil) {
+        enemy.sprite.setTint(0xf97316);
+      } else {
+        enemy.sprite.clearTint()
+      }
+    });
     this.spawnFloatingText(enemy.sprite.x, enemy.sprite.y - 25, `${Math.ceil(damage)}`, critical ? 0xfef08a : 0xf8fafc);
     this.spawnRing(enemy.sprite.x, enemy.sprite.y, critical ? 0xfef08a : 0xff6b6b);
   }
@@ -1604,31 +1423,38 @@ export default class SurvivalScene extends Phaser.Scene {
     return { x: PLAYER_START.x, y: PLAYER_START.y, type: 'base' as const };
   }
 
-  private applyEnemyAttack(enemy: Enemy, target: ReturnType<SurvivalScene['findEnemyTarget']>) {
-    if (enemy.kind === 'skeleton') {
-      this.drawShot(enemy.sprite.x, enemy.sprite.y, target.x, target.y, 0xf8fafc);
-    } else {
-      this.spawnRing(target.x, target.y, 0xff6b6b);
-    }
+  private fireEnemyProjectile(enemy: Enemy, target: {x:number, y:number, type: string}) {
+    const angle = Phaser.Math.Angle.Between(enemy.sprite.x, enemy.sprite.y, target.x, target.y);
+    const speed = 200;
+    const proj = this.add.image(enemy.sprite.x, enemy.sprite.y, 'projectile-bone').setDepth(5).setScale(3);
+    proj.setData('vx', Math.cos(angle) * speed);
+    proj.setData('vy', Math.sin(angle) * speed);
+    proj.setData('life', this.time.now + 2500);
+    proj.setData('damage', enemy.damage * (this.isNight ? 1.5 : 1));
+    this.enemyProjectiles.push(proj);
+  }
 
+  private applyEnemyAttack(enemy: Enemy, target: { type: string; defense?: Defense; x: number; y: number }) {
+    if (this.deadUntil > 0) return;
+    const time = this.time.now;
+    this.spawnRing(target.x, target.y, 0xff6b6b);
+
+    enemy.lastAttack = time;
+    const dmg = enemy.damage * (this.isNight ? 1.5 : 1);
     if (target.type === 'player') {
-      this.hp -= enemy.damage;
-      this.player.setTint(0xffadad);
-      this.time.delayedCall(90, () => this.player.clearTint());
-      if (this.hp <= 0) {
-        this.handlePlayerDeath();
-      }
+      this.damagePlayer(dmg);
     } else if (target.type === 'base') {
-      this.baseHp -= enemy.damage;
-      this.base.setTint(0xffadad);
-      this.time.delayedCall(90, () => this.base.clearTint());
-      if (this.baseHp <= 0) {
-        this.handleBaseDestroyed();
-      }
-    } else {
-      target.defense.hp -= enemy.damage;
+      this.damageBase(dmg);
+    } else if (target.type === 'defense' && target.defense) {
+      target.defense.hp -= dmg;
       target.defense.sprite.setTint(0xffadad);
-      this.time.delayedCall(90, () => target.defense.sprite.clearTint());
+      this.time.delayedCall(150, () => {
+        if (target.defense) target.defense.sprite.clearTint();
+      });
+      if (target.defense.hp <= 0) {
+        target.defense.sprite.destroy();
+        this.defenses = this.defenses.filter((d) => d.id !== target.defense!.id);
+      }
     }
   }
 
@@ -1725,7 +1551,7 @@ export default class SurvivalScene extends Phaser.Scene {
     const blade = this.currentBlade();
     const texture = this.bladeTextureKey(blade.level);
     while (this.blades.length < blade.bladeCount) {
-      const sprite = this.add.image(this.player.x, this.player.y, texture).setDepth(7);
+      const sprite = this.add.image(this.player.x, this.player.y, texture).setDepth(7).setScale(3);
       this.blades.push(sprite);
     }
 
@@ -1824,7 +1650,8 @@ export default class SurvivalScene extends Phaser.Scene {
       market: { x: MARKET_POS.x, y: MARKET_POS.y },
       world: { ...WORLD },
       dots,
-      defenses: this.defenses.length
+      defenses: this.defenses.length,
+      gameOver: this.baseHp <= 0
     };
 
     gameEvents.emit('game:snapshot', snapshot);

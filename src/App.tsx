@@ -428,7 +428,9 @@ function GameOverOverlay({ snapshot, onMenu }: { snapshot: GameSnapshot; onMenu:
           <Skull size={48} />
         </div>
         <h2 className="gameover-title">Game Over</h2>
-        <p className="gameover-subtitle">Base telah hancur!</p>
+        <p className="gameover-subtitle">
+          {snapshot.baseHp <= 0 ? '🏚️ Base hancur!' : '💀 Kamu mati!'}
+        </p>
 
         <div className="gameover-stats">
           <div className="gameover-stat">

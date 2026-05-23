@@ -493,6 +493,7 @@ function MiniMap({ snapshot }: { snapshot: GameSnapshot }) {
 function VirtualJoystick() {
   const padRef = useRef<HTMLDivElement | null>(null);
   const [stick, setStick] = useState({ x: 0, y: 0, active: false });
+  const [lastTap, setLastTap] = useState(0);
 
   const updateStick = (event: PointerEvent<HTMLDivElement>) => {
     const bounds = padRef.current?.getBoundingClientRect();
@@ -522,6 +523,12 @@ function VirtualJoystick() {
       ref={padRef}
       className={stick.active ? 'virtual-joystick active' : 'virtual-joystick'}
       onPointerDown={(event) => {
+        const now = Date.now();
+        if (now - lastTap < 300) {
+          gameEvents.emit('ui:dash');
+        }
+        setLastTap(now);
+        
         event.currentTarget.setPointerCapture(event.pointerId);
         updateStick(event);
       }}

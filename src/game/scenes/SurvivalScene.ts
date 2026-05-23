@@ -384,6 +384,7 @@ export default class SurvivalScene extends Phaser.Scene {
     gameEvents.on('ui:build', this.buildDefense, this);
     gameEvents.on('ui:nextWave', this.requestNextWave, this);
     gameEvents.on('ui:joystick', this.setJoystick, this);
+    gameEvents.on('ui:dash', this.triggerDash, this);
     gameEvents.on('ui:setMute', this.setMute, this);
 
     const cleanupEvents = () => {
@@ -397,6 +398,7 @@ export default class SurvivalScene extends Phaser.Scene {
       gameEvents.off('ui:build', this.buildDefense, this);
       gameEvents.off('ui:nextWave', this.requestNextWave, this);
       gameEvents.off('ui:joystick', this.setJoystick, this);
+      gameEvents.off('ui:dash', this.triggerDash, this);
       gameEvents.off('ui:setMute', this.setMute, this);
     };
 
@@ -835,20 +837,10 @@ export default class SurvivalScene extends Phaser.Scene {
       return;
     }
 
-    const cost: Cost = { coins: 55 };
-    if (this.hp >= this.maxHp) {
-      this.showMessage('HP masih penuh.');
-      return;
-    }
-    if (!this.canAfford(cost)) {
-      this.showMessage('Butuh 55 coin untuk heal.');
-      return;
-    }
-
-    this.payCost(cost);
-    this.hp = Math.min(this.maxHp, this.hp + 35);
-    this.showMessage('HP pulih.');
-    this.spawnRing(this.player.x, this.player.y, 0x6ee7b7);
+    this.hp = 0;
+    this.running = false;
+    this.message = 'Player Mati! Anda kalah.';
+    this.audio.playGameOver();
     this.emitSnapshot(true);
   }
 
@@ -900,6 +892,14 @@ export default class SurvivalScene extends Phaser.Scene {
     this.nextWaveAt = this.time.now;
   }
 
+  private triggerDash() {
+    if (this.time.now > this.dashCooldown) {
+      this.dashUntil = this.time.now + 200;
+      this.dashCooldown = this.time.now + 2000;
+      this.audio.playDash();
+    }
+  }
+
   private updatePlayer(dt: number) {
     const move = new Phaser.Math.Vector2(0, 0);
     if (this.keys.W.isDown || this.keys.UP.isDown) move.y -= 1;
@@ -913,10 +913,8 @@ export default class SurvivalScene extends Phaser.Scene {
     }
 
     const isDashing = this.time.now < this.dashUntil;
-    if (!isDashing && (this.keys.SPACE.isDown || this.keys.SHIFT.isDown) && this.time.now > this.dashCooldown && move.lengthSq() > 0) {
-      this.dashUntil = this.time.now + 200;
-      this.dashCooldown = this.time.now + 2000;
-      this.audio.playDash();
+    if (!isDashing && (this.keys.SPACE.isDown || this.keys.SHIFT.isDown) && move.lengthSq() > 0) {
+      this.triggerDash();
     }
     
     if (this.dashRing) {
@@ -1651,7 +1649,7 @@ export default class SurvivalScene extends Phaser.Scene {
       world: { ...WORLD },
       dots,
       defenses: this.defenses.length,
-      gameOver: this.baseHp <= 0
+      gameOver: this.baseHp <= 0 || this.hp <= 0
     };
 
     gameEvents.emit('game:snapshot', snapshot);

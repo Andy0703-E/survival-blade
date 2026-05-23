@@ -15,6 +15,9 @@ export class AudioController {
         console.warn('Web Audio API not supported');
       }
     }
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
   }
 
   public setMuted(muted: boolean) {
